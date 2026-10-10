@@ -132,6 +132,16 @@ class Tunnel:
         okm = derive(self.ka.get(), k_pqc(), k_ecdhe(), b"znoc1|rnoc1|session-%06d" % self.n)
         return next(SPI), next(SPI), okm[:36], okm[36:]
 
+    def up(self):
+        """Bring the tunnel up. The first key is fetched BEFORE the ESP policies exist, because once a policy is
+        installed all traffic between the two hosts (including the key fetch) needs a matching SA."""
+        a, b, ka_, kb_ = self.new_keys()
+        add = [st_add(L, R, a, ka_), st_add(R, L, b, kb_)]
+        batch("znoc", add)
+        batch("rnoc", add)
+        self.policies()
+        self.cur = (a, b)
+
     def rekey(self):
         t0 = time.perf_counter()
         a, b, ka_, kb_ = self.new_keys()
@@ -260,10 +270,10 @@ if __name__ == "__main__":
         tun = Tunnel(ka)
         # preflight: can the kernel do ESP with AES-GCM?
         try:
-            tun.policies()
-            tun.rekey()
+            tun.up()
+            ka.get()   # a fetch that now has to travel inside ESP proves the tunnel carries traffic
         except Exception as e:
-            res["error"] = "xfrm/ESP AES-GCM not available on this kernel: %s" % e
+            res["error"] = "preflight failed (%s): %s" % (type(e).__name__, e)
             print(res["error"])
             sys.exit(2)
         tun.flush()
@@ -274,8 +284,7 @@ if __name__ == "__main__":
             pt = {"one_way_delay_ms": d, "ping_rtt_ms": ping_avg()}
             tun.flush()
             pt["plain"] = iperf(a.dur)
-            tun.policies()
-            tun.rekey()
+            tun.up()
             pt["esp"] = iperf(a.dur)
             stop, times = threading.Event(), []
 
@@ -294,8 +303,7 @@ if __name__ == "__main__":
         # cost of one refresh, no traffic
         set_delay(0)
         tun.flush()
-        tun.policies()
-        tun.rekey()
+        tun.up()
         c0, dv, ins = cpu_s(), [], []
         for _ in range(a.n_refresh):
             x, y = tun.rekey()
