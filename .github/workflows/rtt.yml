@@ -1,0 +1,50 @@
+name: rtt-sweep
+on:
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable network-delay emulation (netem)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q iproute2 iputils-ping "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe sch_netem || true
+          sudo tc qdisc add dev lo root netem delay 1ms
+          sudo tc qdisc del dev lo root
+          echo "netem works"
+
+      - name: Cache OpenSSL 3.5
+        id: cache-ossl
+        uses: actions/cache@v4
+        with:
+          path: /opt/ossl
+          key: openssl-3.5.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build OpenSSL 3.5 (needed for X25519MLKEM768)
+        if: steps.cache-ossl.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o ossl.tar.gz https://github.com/openssl/openssl/releases/download/openssl-3.5.0/openssl-3.5.0.tar.gz
+          tar xzf ossl.tar.gz
+          cd openssl-3.5.0
+          ./Configure --prefix=/opt/ossl --libdir=lib no-docs no-tests
+          make -j"$(nproc)"
+          sudo make install_sw
+
+      - name: Run sweep
+        run: |
+          export LD_LIBRARY_PATH=/opt/ossl/lib
+          /opt/ossl/bin/openssl version
+          sudo env LD_LIBRARY_PATH=/opt/ossl/lib python3 rtt_sweep.py \
+            --openssl /opt/ossl/bin/openssl --delays 0,5,25,50 --n-fetch 50 --n-tls 30 --out rtt_sweep.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rtt-sweep
+          path: |
+            rtt_sweep.json
+            rtt_sweep.md
