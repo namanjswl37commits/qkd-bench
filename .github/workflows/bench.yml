@@ -1,0 +1,72 @@
+name: bench
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: znoc
+            runner: ubuntu-24.04
+          - role: rnoc
+            runner: ubuntu-22.04
+          - role: endpoint
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages (OpenSSL 3.5 comes with Debian trixie)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-pip python3-venv git cmake ninja-build build-essential libssl-dev openssl ca-certificates util-linux iproute2 procps
+          openssl version
+
+      - name: Python environment (cryptography + liboqs-python)
+        run: |
+          python3 -m venv /opt/venv
+          /opt/venv/bin/pip install --upgrade pip cryptography liboqs-python
+          /opt/venv/bin/python -c "import oqs; print('liboqs', oqs.oqs_version())"
+
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          mkdir -p results
+          PY=/opt/venv/bin/python
+          $PY mock_etsi014_v2.py --host 127.0.0.1 --port 8080 > mock.log 2>&1 &
+          MOCK=$!
+          sleep 2
+          $PY collect_config.py --role ${{ matrix.role }} --out results/config_${{ matrix.role }}.json
+          $PY bench_tls.py --role ${{ matrix.role }} --n 200 --out results/tls_${{ matrix.role }}.json
+          $PY hkdf_bench_v2.py --role ${{ matrix.role }} --n 200 --qkd-url http://127.0.0.1:8080 --out results/hkdf_${{ matrix.role }}.json
+          kill $MOCK || true
+
+      - name: Save results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.role }}
+          path: results/
+
+  report:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: results-*
+          merge-multiple: true
+      - name: Build the table
+        run: python3 fill_table.py results --main znoc
+      - name: Save table
+        uses: actions/upload-artifact@v4
+        with:
+          name: filled-table
+          path: results/filled_table.md
