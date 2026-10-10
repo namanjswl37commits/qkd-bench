@@ -1,0 +1,37 @@
+name: topo-bench
+on:
+  workflow_dispatch:
+
+jobs:
+  topo:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools and kernel modules
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q iproute2 iperf3 iputils-ping python3-venv git cmake ninja-build build-essential libssl-dev "linux-modules-extra-$(uname -r)" || true
+          for m in sch_netem veth xfrm_user xfrm_algo esp4 gcm aesni_intel; do sudo modprobe $m || echo "modprobe $m failed"; done
+          uname -r; python3 --version; iperf3 --version | head -1
+          grep -c ' aes ' /proc/cpuinfo || true
+
+      - name: Python environment (cryptography + liboqs)
+        run: |
+          python3 -m venv /opt/venv
+          /opt/venv/bin/pip install -q cryptography liboqs-python
+          /opt/venv/bin/python -c "import oqs; print('liboqs', oqs.oqs_version())"
+
+      - name: Run topology benchmark
+        run: |
+          sudo /opt/venv/bin/python collect_config.py --role znoc --out config_znoc.json || true
+          sudo /opt/venv/bin/python topo_bench.py --delays 0,10 --dur 10 --tau 1 --scale 100,1000 --out topo_results.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: topo-results
+          path: |
+            topo_results.json
+            topo_results.md
+            config_znoc.json
